@@ -9,4 +9,4 @@ from . import auth
 from . import users
 from . import protected
 from . import admin
-
+from . import cms

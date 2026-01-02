@@ -18,5 +18,6 @@ def create_app(config_name="development"):
 
     # Register versioned API blueprints
     app.register_blueprint(v1_bp, url_prefix='/api/v1')
+    
 
     return app

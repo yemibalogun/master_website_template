@@ -11,5 +11,13 @@ class Page(BaseModel, TenantMixin):
     seo = db.Column(db.JSON, default={})
 
     __table_args__ = (
-        db.UniqueConstraint("tenant_id", "slug", name="uq_page_slug_per_tenant"),
+        db.UniqueConstraint("tenant_id", "slug", nam_e="uq_page_slug_per_tenant"),
+    )
+
+    # Relationship to Sections (ordered, cascade deletes)
+    sections = db.relationship(
+        "Section",
+        back_populates="page",
+        order_by="Section.order",
+        cascade="all, delete-orphan"
     )

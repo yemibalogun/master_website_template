@@ -8,6 +8,7 @@ class BaseConfig:
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
 class DevelopmentConfig(BaseConfig):
+    UPLOAD_FOLDER = 'uploads'
     DEBUG = True
     SQLALCHEMY_DATABASE_URI = os.getenv("DEV_DATABASE_URI")
 
