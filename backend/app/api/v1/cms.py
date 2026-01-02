@@ -3,6 +3,7 @@ from flask import Blueprint, g, request, jsonify
 from flask_jwt_extended import jwt_required
 from app.utils.decorators import tenant_required, roles_required, feature_enabled
 from app.utils.media import save_file, delete_file
+from app.utils.order import compact_order
 from app.models.page import Page
 from app.models.section import Section
 from app.models.block import Block
@@ -281,9 +282,19 @@ def delete_section(section_id):
     tenant = g.current_tenant
     section = Section.query.filter_by(id=section_id, tenant_id=tenant.id).first_or_404()
 
+    page_id = section.page_id
+
     db.session.delete(section)
+    db.session.flush()
+
+    # Re-compact remaining sections on the page
+    compact_order(
+        Section.query.filter_by(page_id=page_id, tenant_id=tenant.id)
+    )
+
     db.session.commit()
-    return jsonify({"message": "Section deleted successfully"}), 200
+
+    return jsonify({"message": "Section deleted and order re-compacted"}), 200
 
 
 @cms_bp.route("/sections/<section_id>/blocks", methods=["GET"])
@@ -320,32 +331,36 @@ def reorder_sections(page_id):
     tenant = g.current_tenant
     data = request.get_json()  # [{id: "...", order: 0}, ...]
     
-    if not isinstance(data, list) or not data:
-        return jsonify({"error": "A non-empty list of sections with 'id' and 'order' is required"}), 400
+    if not isinstance(data, list):
+        return jsonify({"error": "Invalid payload"}), 400
 
     # Optional: paginate the reordering
     page_num = int(request.args.get("page", 1))
     per_page = int(request.args.get("per_page", len(data)))
 
     # Fetch only sections in the current page
-    pagination = Section.query.filter_by(page_id=page_id, tenant_id=tenant.id)\
-        .order_by(Section.order.asc())\
+    pagination = Section.query.filter_by(
+        page_id=page_id, 
+        tenant_id=tenant.id
+        ).order_by(Section.order.asc())\
         .paginate(page=page_num, per_page=per_page, error_out=False)
 
     # Map paginated sections by id for validation
-    page_section_ids = {s.id for s in pagination.items}
+    section_map = {s.id: s for s in pagination.items}
 
-    # Apply new orders only for sections on this page
-    updated_count = 0
     for item in data:
-        if item["id"] in page_section_ids:
-            section = next((s for s in pagination.items if s.id == item["id"]), None)
-            if section:
-                section.order = item["order"]
-                updated_count += 1
+        if item["id"] in section_map:
+            section_map[item["id"]].order = item["order"]
+
+    db.session.flush()
+
+    # FINAL STEP: re-compact ALL sections on this page
+    compact_order(
+        Section.query.filter_by(page_id=page_id, tenant_id=tenant.id)
+    )
 
     db.session.commit()
-    return jsonify({"message": f"{updated_count} sections reordered successfully"}), 200
+    return jsonify({"message": "Sections reordered and normalized"}), 200
 
 
 # ------------------------
@@ -421,13 +436,22 @@ def delete_block(block_id):
     tenant = g.current_tenant
     block = Block.query.filter_by(id=block_id, tenant_id=tenant.id).first_or_404()
 
+    section_id = block.section_id
+
     # Delete media file first
     if block.media_url:
         delete_file(block.media_url)
 
     db.session.delete(block)
+    db.session.flush()
+
+    compact_order(
+        Block.query.filter_by(section_id=section_id, tenant_id=tenant.id)
+    )
+
     db.session.commit()
-    return jsonify({"message": "Block deleted successfully"}), 200
+    return jsonify({"message": "Block deleted and order re-compacted"}), 200
+
 
 @cms_bp.route("/sections/<section_id>/blocks/reorder", methods=["POST"])
 @jwt_required()
@@ -438,31 +462,33 @@ def reorder_blocks(section_id):
     tenant = g.current_tenant
     data = request.get_json()  # [{id: "...", order: 0}, ...]
 
-    if not isinstance(data, list) or not data:
-        return jsonify({"error": "A non-empty list of blocks with 'id' and 'order' is required"}), 400
+    if not isinstance(data, list):
+        return jsonify({"error": "Invalid payload"}), 400
 
     # Optional: paginate the reordering
     page_num = int(request.args.get("page", 1))
     per_page = int(request.args.get("per_page", len(data)))
 
     # Fetch only blocks in the current page
-    pagination = Block.query.filter_by(section_id=section_id, tenant_id=tenant.id)\
-        .order_by(Block.order.asc())\
+    pagination = Block.query.filter_by(
+        section_id=section_id, 
+        tenant_id=tenant.id
+        ).order_by(Block.order.asc())\
         .paginate(page=page_num, per_page=per_page, error_out=False)
 
-    # Map paginated blocks by id for validation
-    page_block_ids = {b.id for b in pagination.items}
+    block_map = {b.id: b for b in pagination.items}
 
-    # Apply new orders only for blocks on this page
-    updated_count = 0
     for item in data:
-        if item["id"] in page_block_ids:
-            block = next((b for b in pagination.items if b.id == item["id"]), None)
-            if block:
-                block.order = item["order"]
-                updated_count += 1
+        if item["id"] in block_map:
+            block_map[item["id"]].order = item["order"]
+
+    db.session.flush()
+
+    compact_order(
+        Block.query.filter_by(section_id=section_id, tenant_id=tenant.id)
+    )
 
     db.session.commit()
-    return jsonify({"message": f"{updated_count} blocks reordered successfully"}), 200
+    return jsonify({"message": f"Blocks reordered and normalized"}), 200
 
 
