@@ -1,8 +1,9 @@
 from app.extensions import db
 from .base import BaseModel
 from .tenant_mixin import TenantMixin
+from .soft_delete_mixin import SoftDeleteMixin
 
-class Block(BaseModel, TenantMixin):
+class Block(BaseModel, TenantMixin, SoftDeleteMixin):
     __tablename__ = "blocks"
 
     section_id = db.Column(db.String(36), db.ForeignKey("sections.id"), nullable=False)
