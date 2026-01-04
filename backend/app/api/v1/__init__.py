@@ -12,3 +12,4 @@ from . import admin
 from . import cms
 from . import audit
 
+v1_bp.register_blueprint(audit.audit_bp, url_prefix="/audit")
