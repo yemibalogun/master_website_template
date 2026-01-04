@@ -7,8 +7,8 @@ class Page(BaseModel, TenantMixin, SoftDeleteMixin):
     __tablename__ = 'pages'
 
     title = db.Column(db.String(200), nullable=False)
-    slug = db.Column(db.String(200), nullable=False)
-    status = db.Column(db.String(50), default='draft')
+    slug = db.Column(db.String(200), nullable=False, index=True)
+    status = db.Column(db.String(50), default='draft', index=True)
     seo = db.Column(db.JSON, default=dict)
 
     __table_args__ = (

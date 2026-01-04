@@ -10,7 +10,7 @@ class User(BaseModel, TenantMixin):
     password_hash = db.Column(db.String(128), nullable=False)
     last_login_at = db.Column(db.DateTime)
 
-    role = db.Column(db.String(50), nullable=False, default='user')
+    role = db.Column(db.String(50), nullable=False, default='user', index=True)
     is_active = db.Column(db.Boolean, default=True)
 
     __table_args__ = (

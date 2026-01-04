@@ -7,7 +7,7 @@ class Tenant(BaseModel):
 
     # Basic info
     name = db.Column(db.String(255), nullable=False)
-    slug = db.Column(db.String(255), unique=True, nullable=False)
+    slug = db.Column(db.String(255), unique=True, nullable=False, index=True)
     is_active = db.Column(db.Boolean, default=True)
 
     # Feature toggles (modern SaaS)

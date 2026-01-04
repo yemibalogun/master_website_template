@@ -1,20 +1,20 @@
-# app/services/audit_logger.py
+from flask import g
 from app.extensions import db
 from app.models.audit_log import AuditLog
 
 def log_action(
     *,
-    actor_id: str,
-    tenant_id: str,
     action: str,
     entity_type: str,
     entity_id: str,
     payload: dict | None = None
 ):
+    if not hasattr(g, "current_tenant") or not hasattr(g, "current_user"):
+        return  # Skip logging if user or tenant context is missing
     log = AuditLog()
 
-    log.actor_id = actor_id
-    log.tenant_id = tenant_id
+    log.actor_id = getattr(g, "current_user", None) and g.current_user.id
+    log.tenant_id = g.current_tenant.id
     log.action = action
     log.entity_type = entity_type
     log.entity_id = entity_id

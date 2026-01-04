@@ -6,9 +6,9 @@ from .soft_delete_mixin import SoftDeleteMixin
 class Block(BaseModel, TenantMixin, SoftDeleteMixin):
     __tablename__ = "blocks"
 
-    section_id = db.Column(db.String(36), db.ForeignKey("sections.id"), nullable=False)
+    section_id = db.Column(db.String(36), db.ForeignKey("sections.id"), nullable=False, index=True)
     type = db.Column(db.String(100), nullable=False)  # text, image, video, button
-    order = db.Column(db.Integer, nullabe=False, default=0)
+    order = db.Column(db.Integer, nullabe=False, default=0, index=True)
     content = db.Column(db.JSON, default=dict) # JSON for text/button data
     media_url = db.Column(db.String(512), nullable=True) # URL for images/videos if applicable
 

@@ -8,10 +8,11 @@ class PageVersion(BaseModel, TenantMixin):
     page_id = db.Column(
         db.String(36),
         db.ForeignKey("pages.id"),
-        nullable=False
+        nullable=False,
+        index=True
     )
 
-    version = db.Column(db.Integer, nullable=False)
+    version = db.Column(db.Integer, nullable=False, index=True)
     status = db.Column(db.String(20), nullable=False)  
     # draft | published | archived | rollback
 

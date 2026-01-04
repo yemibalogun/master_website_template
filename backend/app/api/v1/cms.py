@@ -64,8 +64,6 @@ def create_page():
     db.session.flush()  # ensures page.id exists
 
     log_action(
-        actor_id=g.current_user.id,
-        tenant_id=tenant.id,
         action="page.create",
         entity_type="page",
         entity_id=page.id,
@@ -144,8 +142,6 @@ def update_page(page_id):
 
     if changed_fields:
         log_action(
-            actor_id=g.current_user.id,
-            tenant_id=tenant.id,
             action="page.update",
             entity_type="page",
             entity_id=page.id,
@@ -197,8 +193,6 @@ def publish_page(page_id):
     db.session.flush()
 
     log_action(
-        actor_id=g.current_user.id,
-        tenant_id=tenant.id,
         action="page.publish",
         entity_type="page",
         entity_id=page.id,
@@ -224,8 +218,6 @@ def unpublish_page(page_id):
     page.status = "draft"
 
     log_action(
-        actor_id=g.current_user.id,
-        tenant_id=tenant.id,
         action="page.unpublish",
         entity_type="page",
         entity_id=page.id,
@@ -253,8 +245,6 @@ def delete_page(page_id):
             block.soft_delete()
 
     log_action(
-        actor_id=g.current_user.id,
-        tenant_id=tenant.id,
         action="page.delete",
         entity_type="page",
         entity_id=page.id,
@@ -412,8 +402,6 @@ def rollback_page(page_id, version):
     db.session.add(new_version)
 
     log_action(
-        actor_id=g.current_user.id,
-        tenant_id=tenant.id,
         action="page.rollback",
         entity_type="page",
         entity_id=page.id,
@@ -468,8 +456,6 @@ def create_section(page_id):
     db.session.flush()
 
     log_action(
-        actor_id=g.current_user.id,
-        tenant_id=tenant.id,
         action="section.create",
         entity_type="section",
         entity_id=section.id,
@@ -511,8 +497,6 @@ def update_section(section_id):
 
     if changed_fields:
         log_action(
-            actor_id=g.current_user.id,
-            tenant_id=tenant.id,
             action="section.update",
             entity_type="section",
             entity_id=section.id,
@@ -543,8 +527,6 @@ def delete_section(section_id):
     )
 
     log_action(
-        actor_id=g.current_user.id,
-        tenant_id=tenant.id,
         action="section.delete",
         entity_type="section",
         entity_id=section.id,
@@ -623,8 +605,6 @@ def reorder_sections(page_id):
     )
 
     log_action(
-        actor_id=g.current_user.id,
-        tenant_id=tenant.id,
         action="section.reorder",
         entity_type="page",
         entity_id=page_id,
@@ -680,8 +660,6 @@ def create_block(section_id):
     db.session.flush()
 
     log_action(
-        actor_id=g.current_user.id,
-        tenant_id=tenant.id,
         action="block.create",
         entity_type="block",
         entity_id=block.id,
@@ -732,8 +710,6 @@ def update_block(block_id):
 
     if changed_fields:
         log_action(
-            actor_id=g.current_user.id,
-            tenant_id=tenant.id,
             action="block.update",
             entity_type="block",
             entity_id=block.id,
@@ -768,8 +744,6 @@ def delete_block(block_id):
     )
 
     log_action(
-        actor_id=g.current_user.id,
-        tenant_id=tenant.id,
         action="block.delete",
         entity_type="block",
         entity_id=block.id,
@@ -816,8 +790,6 @@ def reorder_blocks(section_id):
     )
 
     log_action(
-        actor_id=g.current_user.id,
-        tenant_id=tenant.id,
         action="block.reorder",
         entity_type="section",
         entity_id=section_id,
@@ -863,8 +835,6 @@ def autosave_page(page_id):
     db.session.add(draft)
 
     log_action(
-        actor_id=g.current_user.id,
-        tenant_id=tenant.id,
         action="page.autosave",
         entity_type="page",
         entity_id=page.id
@@ -899,8 +869,6 @@ def bulk_publish():
             page.status = "draft"
 
     log_action(
-        actor_id=g.current_user.id,
-        tenant_id=tenant.id,
         action=f"page.bulk_{action}",
         entity_type="page",
         entity_id="*",

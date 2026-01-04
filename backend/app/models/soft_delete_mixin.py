@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 local_time_now = datetime.now(timezone.utc).astimezone()
 
 class SoftDeleteMixin:
-    deleted_at = db.Column(db.DateTime, nullable=True)
+    deleted_at = db.Column(db.DateTime, nullable=True, index=True)
 
     def soft_delete(self):
         self.deleted_at = local_time_now

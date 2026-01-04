@@ -6,9 +6,9 @@ from .soft_delete_mixin import SoftDeleteMixin
 class Section(BaseModel, TenantMixin, SoftDeleteMixin):
     __tablename__ = "sections"
     
-    page_id = db.Column(db.String(36), db.ForeignKey("pages.id"), nullable=False)
+    page_id = db.Column(db.String(36), db.ForeignKey("pages.id"), nullable=False, index=True)
     type = db.Column(db.String(100), nullable=False)  # hero, features, gallery
-    order = db.Column(db.Integer, nullable=False, default=0)
+    order = db.Column(db.Integer, nullable=False, default=0, index=True)
     settings = db.Column(db.JSON, default=dict)
 
     # Relationship to parent Page
