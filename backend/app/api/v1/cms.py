@@ -7,6 +7,7 @@ from app.utils.order import compact_order
 from app.utils.versioning import snapshot_page, next_version
 from app.utils.audit import log_action
 from app.utils.optimistic_lock import enforce_optimistic_lock
+from app.utils.transaction import transactional
 from app.models.page import Page
 from app.models.section import Section
 from app.models.block import Block
@@ -52,28 +53,28 @@ def create_page():
     if existing:
         return jsonify({"error": "Slug already exists"}), 409
 
-    page = Page()
-    
-    page.tenant_id = tenant.id  # add tenant
-    page.title = data["title"]
-    page.slug = data["slug"]
-    page.status = data.get("status", "draft")
-    page.seo = data.get("seo", {})
+    with transactional():
+        page = Page()
+        
+        page.tenant_id = tenant.id  # add tenant
+        page.title = data["title"]
+        page.slug = data["slug"]
+        page.status = data.get("status", "draft")
+        page.seo = data.get("seo", {})
 
-    db.session.add(page)
-    db.session.flush()  # ensures page.id exists
+        db.session.add(page)
+        db.session.flush()  # ensures page.id exists
 
-    log_action(
-        action="page.create",
-        entity_type="page",
-        entity_id=page.id,
-        payload={
-            "title": page.title,
-            "slug": page.slug,
-            "status": page.status
-        }
-    )
-    db.session.commit()
+        log_action(
+            action="page.create",
+            entity_type="page",
+            entity_id=page.id,
+            payload={
+                "title": page.title,
+                "slug": page.slug,
+                "status": page.status
+            }
+        )
 
     return jsonify({
         "id": page.id, 
@@ -121,10 +122,9 @@ def update_page(page_id):
     # Optimistic Locking Check
     # -----------------------
     enforce_optimistic_lock(page)
-        
     data = request.get_json() or {}
 
-    # Slug collision check
+    # Slug collision check stays OUTSIDE transaction (read-only)
     if "slug" in data and data["slug"] != page.slug:
         exists = Page.query.filter_by(
             tenant_id=tenant.id,
@@ -133,24 +133,23 @@ def update_page(page_id):
         if exists:
             return jsonify({"error": "Slug already exists"}), 409
 
-    changed_fields = []
+    with transactional():
+        changed_fields = []
 
-    for field in ("title", "slug", "status", "seo"):
-        if field in data and getattr(page, field) != data[field]:
-            setattr(page, field, data[field])
-            changed_fields.append(field)
+        for field in ("title", "slug", "status", "seo"):
+            if field in data and getattr(page, field) != data[field]:
+                setattr(page, field, data[field])
+                changed_fields.append(field)
 
-    if changed_fields:
-        log_action(
-            action="page.update",
-            entity_type="page",
-            entity_id=page.id,
-            payload={
-                "fields": changed_fields
-            }
-        )
-
-    db.session.commit()
+        if changed_fields:
+            log_action(
+                action="page.update",
+                entity_type="page",
+                entity_id=page.id,
+                payload={
+                    "fields": changed_fields
+                }
+            )
 
     return jsonify({"message": "Page updated successfully"}), 200
 
@@ -178,28 +177,27 @@ def publish_page(page_id):
     tenant = g.current_tenant
     page = Page.query.filter_by(id=page_id, tenant_id=tenant.id).first_or_404()
 
-    # Create snapshot
-    version = PageVersion()
-    version.page_id = page.id
-    version.tenant_id = tenant.id
-    version.version = next_version(page.id, tenant.id)
-    version.status = "published"
-    version.snapshot = snapshot_page(page)
-    version.created_by = g.current_user.id
-    
-    page.status = "published"
+    with transactional():
+        # Create snapshot
+        version = PageVersion()
+        version.page_id = page.id
+        version.tenant_id = tenant.id
+        version.version = next_version(page.id, tenant.id)
+        version.status = "published"
+        version.snapshot = snapshot_page(page)
+        version.created_by = g.current_user.id
+        
+        page.status = "published"
 
-    db.session.add(version)
-    db.session.flush()
+        db.session.add(version)
+        db.session.flush()
 
-    log_action(
-        action="page.publish",
-        entity_type="page",
-        entity_id=page.id,
-        payload={"version": version.version}
-    )
-
-    db.session.commit()
+        log_action(
+            action="page.publish",
+            entity_type="page",
+            entity_id=page.id,
+            payload={"version": version.version}
+        )
 
     return jsonify({
         "message": "Page published",
@@ -215,16 +213,15 @@ def unpublish_page(page_id):
     tenant = g.current_tenant
     page = Page.query.filter_by(id=page_id, tenant_id=tenant.id).first_or_404()
 
-    page.status = "draft"
+    with transactional():
+        page.status = "draft"
 
-    log_action(
-        action="page.unpublish",
-        entity_type="page",
-        entity_id=page.id,
-        payload={}
-    )
-
-    db.session.commit()
+        log_action(
+            action="page.unpublish",
+            entity_type="page",
+            entity_id=page.id,
+            payload={}
+        )
 
     return jsonify({"message": "Page unpublished successfully"}), 200
 
@@ -238,20 +235,27 @@ def delete_page(page_id):
     tenant = g.current_tenant
     page = Page.query.filter_by(id=page_id, tenant_id=tenant.id).first_or_404()
 
-    page.soft_delete()
-    for section in page.sections:
-        section.soft_delete()
-        for block in section.blocks:
-            block.soft_delete()
+    media_to_cleanup = []
 
-    log_action(
-        action="page.delete",
-        entity_type="page",
-        entity_id=page.id,
-        payload={}
-    )
+    with transactional():
+        page.soft_delete()
+        for section in page.sections:
+            section.soft_delete()
+            for block in section.blocks:
+                if block.media_url:
+                    media_to_cleanup.append(block.media_url)
+                block.soft_delete()
 
-    db.session.commit()
+        log_action(
+            action="page.delete",
+            entity_type="page",
+            entity_id=page.id,
+            payload={}
+        )
+    
+    for media_url in media_to_cleanup:
+        delete_file(media_url)
+
     return jsonify({"message": "Page deleted successfully"}), 200
 
 @cms_bp.route("/pages", methods=["GET"])
@@ -345,7 +349,7 @@ def rollback_page(page_id, version):
     snapshot = pv.snapshot
 
     page = Page.query.filter_by(id=page_id, tenant_id=tenant.id).first_or_404()
-
+    
     # Wipe existing content
     sections = Section.query.filter_by(
         page_id=page.id,
@@ -353,65 +357,70 @@ def rollback_page(page_id, version):
         deleted_at=None
     ).all()
 
-    for section in sections:
-        for block in section.blocks:
-            block.soft_delete()
-        section.soft_delete()
+    media_to_cleanup = []
 
-    # Restore snapshot
-    for s in snapshot["sections"]:
-        section = Section()
-        section.tenant_id=tenant.id
-        section.page_id=page.id
-        section.type=s["type"]
-        section.order=s["order"]
-        section.settings=s["settings"]
+    with transactional():
+        for section in sections:
+            for block in section.blocks:
+                if block.media_url:
+                    media_to_cleanup.append(block.media_url)
+                block.soft_delete()
+            section.soft_delete()
+
+        # Restore snapshot
+        for s in snapshot["sections"]:
+            section = Section()
+            section.tenant_id=tenant.id
+            section.page_id=page.id
+            section.type=s["type"]
+            section.order=s["order"]
+            section.settings=s["settings"]
+            
+            db.session.add(section)
+            db.session.flush()
+
+            for b in s["blocks"]:
+                block = Block()
+                block.tenant_id=tenant.id
+                block.section_id=section.id
+                block.type=b["type"]
+                block.order=b["order"]
+                block.content=b["content"]
+                block.media_url=b.get("media_url")
+
+                db.session.add(block)
         
-        db.session.add(section)
-        db.session.flush()
+        # 🔧 FIX STARTS HERE — ORDER NORMALIZATION
+        sections = Section.query.filter_by(page_id=page.id, tenant_id=tenant.id, deleted_at=None)
+        compact_order(sections)
 
-        for b in s["blocks"]:
-            block = Block()
-            block.tenant_id=tenant.id
-            block.section_id=section.id
-            block.type=b["type"]
-            block.order=b["order"]
-            block.content=b["content"]
-            block.media_url=b["media_url"]
+        for section in sections:
+            compact_order(
+                Block.query.filter_by(section_id=section.id, tenant_id=tenant.id, deleted_at=None)
+            )
 
-            db.session.add(block)
-    
-    # 🔧 FIX STARTS HERE — ORDER NORMALIZATION
-    sections = Section.query.filter_by(page_id=page.id, tenant_id=tenant.id, deleted_at=None)
-    compact_order(sections)
+        # Create rollback version
+        new_version = PageVersion()
+        new_version.tenant_id=tenant.id
+        new_version.page_id=page.id
+        new_version.version=next_version(page.id, tenant.id)
+        new_version.status="rollback"
+        new_version.snapshot=snapshot_page(page)
+        new_version.created_by=g.current_user.id
+        
+        db.session.add(new_version)
 
-    for section in sections:
-        compact_order(
-            Block.query.filter_by(section_id=section.id, tenant_id=tenant.id, deleted_at=None)
+        log_action(
+            action="page.rollback",
+            entity_type="page",
+            entity_id=page.id,
+            payload={
+                "from_version": version,
+                "to_version": new_version.version
+            }
         )
-
-    # Create rollback version
-    new_version = PageVersion()
-    new_version.tenant_id=tenant.id
-    new_version.page_id=page.id
-    new_version.version=next_version(page.id, tenant.id)
-    new_version.status="rollback"
-    new_version.snapshot=snapshot_page(page)
-    new_version.created_by=g.current_user.id
-    
-    db.session.add(new_version)
-
-    log_action(
-        action="page.rollback",
-        entity_type="page",
-        entity_id=page.id,
-        payload={
-            "from_version": version,
-            "to_version": new_version.version
-        }
-    )
-
-    db.session.commit()
+    for media_url in media_to_cleanup:
+        delete_file(media_url)
 
     return jsonify({
         "message": f"Rolled back to version {version}",
@@ -440,33 +449,33 @@ def create_section(page_id):
     if section_type not in ALLOWED_SECTION_TYPES:
         return jsonify({"error": "Invalid section type"}), 400
 
-    # Determine the current max order for this page
-    max_order = db.session.query(db.func.max(Section.order))\
-        .filter_by(page_id=page.id, tenant_id=tenant.id)\
-        .scalar() or 0
-    
-    section = Section()
-    section.tenant_id = tenant.id
-    section.page_id = page.id
-    section.type = section_type
-    section.order = max_order + 1
-    section.settings = data.get("settings", {})
+    with transactional():
+        # Determine the current max order for this page
+        max_order = db.session.query(db.func.max(Section.order))\
+            .filter_by(page_id=page.id, tenant_id=tenant.id)\
+            .scalar() or 0
+        
+        section = Section()
+        section.tenant_id = tenant.id
+        section.page_id = page.id
+        section.type = section_type
+        section.order = max_order + 1
+        section.settings = data.get("settings", {})
 
-    db.session.add(section)
-    db.session.flush()
+        db.session.add(section)
+        db.session.flush()
 
-    log_action(
-        action="section.create",
-        entity_type="section",
-        entity_id=section.id,
-        payload={
-            "page_id": page.id,
-            "type": section.type,
-            "order": section.order
-        }
-    )
-    db.session.commit()
-
+        log_action(
+            action="section.create",
+            entity_type="section",
+            entity_id=section.id,
+            payload={
+                "page_id": page.id,
+                "type": section.type,
+                "order": section.order
+            }
+        )
+  
     return jsonify({"id": section.id, "message": "Section created successfully"}), 201
 
 @cms_bp.route("/sections/<section_id>", methods=["PUT"])
@@ -484,26 +493,28 @@ def update_section(section_id):
     enforce_optimistic_lock(section)
 
     data = request.get_json()
-
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+  
     if "type" in data and data["type"] not in ALLOWED_SECTION_TYPES:
         return jsonify({"error": "Invalid section type"}), 400
 
-    changed_fields = []
+    with transactional():
+        changed_fields = []
 
-    for field in ("type", "order", "settings"):
-        if field in data and getattr(section, field) != data[field]:
-            setattr(section, field, data[field])
-            changed_fields.append(field)
+        for field in ("type", "order", "settings"):
+            if field in data and getattr(section, field) != data[field]:
+                setattr(section, field, data[field])
+                changed_fields.append(field)
 
-    if changed_fields:
-        log_action(
-            action="section.update",
-            entity_type="section",
-            entity_id=section.id,
-            payload={"fields": changed_fields}
-        )
+        if changed_fields:
+            log_action(
+                action="section.update",
+                entity_type="section",
+                entity_id=section.id,
+                payload={"fields": changed_fields}
+            )
 
-    db.session.commit()
     return jsonify({"message": "Section updated successfully"}), 200
 
 
@@ -518,22 +529,29 @@ def delete_section(section_id):
 
     page_id = section.page_id
 
-    section.soft_delete()
-    db.session.flush()
+    media_to_cleanup = []
+    
+    with transactional():
+        for block in section.blocks:
+            if block.media_url:
+                media_to_cleanup.append(block.media_url)
+            block.soft_delete()
 
-    # Re-compact remaining sections on the page
-    compact_order(
-        Section.query.filter_by(page_id=page_id, tenant_id=tenant.id, deleted_at=None)
-    )
+        section.soft_delete()
+        db.session.flush()
 
-    log_action(
-        action="section.delete",
-        entity_type="section",
-        entity_id=section.id,
-        payload={"page_id": page_id}
-    )
+        compact_order(
+            Section.query.filter_by(page_id=page_id, tenant_id=tenant.id, deleted_at=None)
+        )
 
-    db.session.commit()
+        log_action(
+            action="section.delete",
+            entity_type="section",
+            entity_id=section.id,
+            payload={"page_id": page_id}
+        )
+    for media_url in media_to_cleanup:
+        delete_file(media_url)
 
     return jsonify({"message": "Section deleted and order re-compacted"}), 200
 
@@ -576,6 +594,7 @@ def reorder_sections(page_id):
     tenant = g.current_tenant
     data = request.get_json()  # [{id: "...", order: 0}, ...]
     
+    
     if not isinstance(data, list):
         return jsonify({"error": "Invalid payload"}), 400
 
@@ -590,32 +609,32 @@ def reorder_sections(page_id):
         ).order_by(Section.order.asc())\
         .paginate(page=page_num, per_page=per_page, error_out=False)
 
-    # Map paginated sections by id for validation
-    section_map = {s.id: s for s in pagination.items}
+    with transactional():
+        # Map paginated sections by id for validation
+        section_map = {s.id: s for s in pagination.items}
 
-    for item in data:
-        if item["id"] in section_map:
-            section_map[item["id"]].order = item["order"]
+        for item in data:
+            if item["id"] in section_map:
+                section_map[item["id"]].order = item["order"]
 
-    db.session.flush()
+        db.session.flush()
 
-    # FINAL STEP: re-compact ALL sections on this page
-    compact_order(
-        Section.query.filter_by(page_id=page_id, tenant_id=tenant.id, deleted_at=None)
-    )
+        # FINAL STEP: re-compact ALL sections on this page
+        compact_order(
+            Section.query.filter_by(page_id=page_id, tenant_id=tenant.id, deleted_at=None)
+        )
 
-    log_action(
-        action="section.reorder",
-        entity_type="page",
-        entity_id=page_id,
-        payload={
-            "page": page_num,
-            "per_page": per_page,
-            "count": len(data)
-        }
-    )
+        log_action(
+            action="section.reorder",
+            entity_type="page",
+            entity_id=page_id,
+            payload={
+                "page": page_num,
+                "per_page": per_page,
+                "count": len(data)
+            }
+        )
 
-    db.session.commit()
     return jsonify({"message": "Sections reordered and normalized"}), 200
 
 
@@ -629,49 +648,71 @@ def reorder_sections(page_id):
 @feature_enabled("enable_cms")
 def create_block(section_id):
     tenant = g.current_tenant
-    section = Section.query.filter_by(id=section_id, tenant_id=tenant.id).first_or_404()
-    
+    section = Section.query.filter_by(
+        id=section_id,
+        tenant_id=tenant.id
+    ).first_or_404()
+
     data = request.form
-    
     block_type = data.get("type")
+
     if not block_type:
         return jsonify({"error": "Block type is required"}), 400
-    
+
     if block_type not in ALLOWED_BLOCK_TYPES:
         return jsonify({"error": "Invalid block type"}), 400
 
-    # Determine the current max order for this section
-    max_order = db.session.query(db.func.max(Block.order))\
-        .filter_by(section_id=section.id, tenant_id=tenant.id)\
-        .scalar() or 0
-    
-    content = data.get("content")
-    media_url = save_file(request.files["file"]) if "file" in request.files else None
+    file = request.files.get("file")
+    media_url = None
 
-    block = Block()
-    block.tenant_id = tenant.id
-    block.section_id = section.id
-    block.type = block_type
-    block.order = max_order + 1  # append at the end
-    block.content = content
-    block.media_url = media_url
+    try:
+        # Save file first (temporary success)
+        if file:
+            media_url = save_file(file)
 
-    db.session.add(block)
-    db.session.flush()
+        with transactional():
+            max_order = (
+                db.session.query(db.func.max(Block.order))
+                .filter_by(section_id=section.id, tenant_id=tenant.id)
+                .scalar()
+                or 0
+            )
 
-    log_action(
-        action="block.create",
-        entity_type="block",
-        entity_id=block.id,
-        payload={
-            "section_id": section.id,
-            "type": block.type,
-            "order": block.order
-        }
-    )
+            block = Block()
+            block.tenant_id=tenant.id
+            block.section_id=section.id
+            block.type=block_type
+            block.order=max_order + 1
+            block.content=data.get("content")
+            block.media_url=media_url
+          
+            db.session.add(block)
+            db.session.flush()
 
-    db.session.commit()
-    return jsonify({"id": block.id, "order": block.order, "message": "Block created successfully"}), 201
+            log_action(
+                action="block.create",
+                entity_type="block",
+                entity_id=block.id,
+                payload={
+                    "section_id": section.id,
+                    "type": block.type,
+                    "order": block.order,
+                },
+            )
+
+        return jsonify(
+            {
+                "id": block.id,
+                "order": block.order,
+                "message": "Block created successfully",
+            }
+        ), 201
+
+    except Exception:
+        # 🔥 CLEANUP ON FAILURE
+        if media_url:
+            delete_file(media_url)
+        raise
 
 @cms_bp.route("/blocks/<block_id>", methods=["PUT"])
 @jwt_required()
@@ -681,44 +722,48 @@ def create_block(section_id):
 def update_block(block_id):
     tenant = g.current_tenant
     block = Block.query.filter_by(id=block_id, tenant_id=tenant.id).first_or_404()
-    
-    # -----------------------
-    # Optimistic Locking Check
-    # -----------------------
+
     enforce_optimistic_lock(block)
-        
+
     data = request.form if request.form else request.get_json(silent=True) or {}
-    
+
+    # ✅ VALIDATE FIRST — BEFORE SAVING FILE
     if "type" in data and data["type"] not in ALLOWED_BLOCK_TYPES:
         return jsonify({"error": "Invalid block type"}), 400
 
-    if 'file' in request.files:
-        if block.media_url:
-            delete_file(block.media_url)
-        # Here you would normally save the file and get its URL
-        block.media_url = save_file(request.files["file"])  # assuming save_file is a utility function
+    new_media_url = None
+    old_media_url = block.media_url
 
-    changed_fields = []
+    try:
+        # SAVE FILE ONLY AFTER VALIDATION
+        if "file" in request.files:
+            new_media_url = save_file(request.files["file"])
 
-    for field in ("type", "order", "content"):
-        if field in data and getattr(block, field) != data[field]:
-            setattr(block, field, data[field])
-            changed_fields.append(field)
+        with transactional():
+            if new_media_url:
+                block.media_url = new_media_url
 
-    if 'file' in request.files:
-        changed_fields.append("media")
+            for field in ("type", "order", "content"):
+                if field in data:
+                    setattr(block, field, data[field])
 
-    if changed_fields:
-        log_action(
-            action="block.update",
-            entity_type="block",
-            entity_id=block.id,
-            payload={"fields": changed_fields}
-        )
+            log_action(
+                action="block.update",
+                entity_type="block",
+                entity_id=block.id
+            )
 
-    db.session.commit()
+        # ✅ DELETE OLD FILE AFTER COMMIT
+        if new_media_url and old_media_url:
+            delete_file(old_media_url)
 
-    return jsonify({"message": "Block updated successfully"}), 200
+        return jsonify({"message": "Block updated successfully"}), 200
+
+    except Exception:
+        # 🔥 CLEANUP IF TRANSACTION FAILS
+        if new_media_url:
+            delete_file(new_media_url)
+        raise
 
 
 @cms_bp.route("/blocks/<block_id>", methods=["DELETE"])
@@ -730,28 +775,22 @@ def delete_block(block_id):
     tenant = g.current_tenant
     block = Block.query.filter_by(id=block_id, tenant_id=tenant.id).first_or_404()
 
-    section_id = block.section_id
+    media_to_delete = block.media_url
 
-    # Delete media file first
-    if block.media_url:
-        delete_file(block.media_url)
+    with transactional():
+        block.soft_delete()
 
-    block.soft_delete()
-    db.session.flush()
+        log_action(
+            action="block.delete",
+            entity_type="block",
+            entity_id=block.id
+        )
 
-    compact_order(
-        Block.query.filter_by(section_id=section_id, tenant_id=tenant.id, deleted_at=None)
-    )
+    # ✅ DELETE FILE AFTER COMMIT
+    if media_to_delete:
+        delete_file(media_to_delete)
 
-    log_action(
-        action="block.delete",
-        entity_type="block",
-        entity_id=block.id,
-        payload={"section_id": section_id}
-    )
-
-    db.session.commit()
-    return jsonify({"message": "Block deleted and order re-compacted"}), 200
+    return jsonify({"message": "Block deleted successfully"}), 200
 
 
 @cms_bp.route("/sections/<section_id>/blocks/reorder", methods=["POST"])
@@ -777,30 +816,31 @@ def reorder_blocks(section_id):
         ).order_by(Block.order.asc())\
         .paginate(page=page_num, per_page=per_page, error_out=False)
 
-    block_map = {b.id: b for b in pagination.items}
+    with transactional():
+        # Map paginated blocks by id for validation
+        block_map = {b.id: b for b in pagination.items}
 
-    for item in data:
-        if item["id"] in block_map:
-            block_map[item["id"]].order = item["order"]
+        for item in data:
+            if item["id"] in block_map:
+                block_map[item["id"]].order = item["order"]
 
-    db.session.flush()
+        db.session.flush()
 
-    compact_order(
-        Block.query.filter_by(section_id=section_id, tenant_id=tenant.id, deleted_at=None)
-    )
+        compact_order(
+            Block.query.filter_by(section_id=section_id, tenant_id=tenant.id, deleted_at=None)
+        )
 
-    log_action(
-        action="block.reorder",
-        entity_type="section",
-        entity_id=section_id,
-        payload={
-            "page": page_num,
-            "per_page": per_page,
-            "count": len(data)
-        }
-    )
+        log_action(
+            action="block.reorder",
+            entity_type="section",
+            entity_id=section_id,
+            payload={
+                "page": page_num,
+                "per_page": per_page,
+                "count": len(data)
+            }
+        )
 
-    db.session.commit()
     return jsonify({"message": f"Blocks reordered and normalized"}), 200
 
 
@@ -823,24 +863,23 @@ def autosave_page(page_id):
         tenant_id=tenant.id
     ).first()
 
-    if not draft:
-        draft = PageDraft()
-        draft.page_id = page.id
-        draft.tenant_id = tenant.id
+    with transactional():
+        if not draft:
+            draft = PageDraft()
+            draft.page_id = page.id
+            draft.tenant_id = tenant.id
 
-    draft.snapshot = snapshot
-    draft.updated_at = datetime.now(timezone.utc).astimezone()
-    draft.updated_by = g.current_user.id
+        draft.snapshot = snapshot
+        draft.updated_at = datetime.now(timezone.utc).astimezone()
+        draft.updated_by = g.current_user.id
 
-    db.session.add(draft)
+        db.session.add(draft)
 
-    log_action(
-        action="page.autosave",
-        entity_type="page",
-        entity_id=page.id
-    )
-
-    db.session.commit()
+        log_action(
+            action="page.autosave",
+            entity_type="page",
+            entity_id=page.id
+        )
 
     return jsonify({"message": "Draft autosaved"}), 200
 
@@ -862,20 +901,19 @@ def bulk_publish():
         Page.deleted_at.is_(None) # type: ignore
     ).all()
 
-    for page in pages:
-        if action == "publish":
-            page.status = "published"
-        elif action == "unpublish":
-            page.status = "draft"
+    with transactional():
+        for page in pages:
+            if action == "publish":
+                page.status = "published"
+            elif action == "unpublish":
+                page.status = "draft"
 
-    log_action(
-        action=f"page.bulk_{action}",
-        entity_type="page",
-        entity_id="*",
-        payload={"count": len(pages)}
-    )
-
-    db.session.commit()
+        log_action(
+            action=f"page.bulk_{action}",
+            entity_type="page",
+            entity_id="*",
+            payload={"count": len(pages)}
+        )
 
     return jsonify({
         "count": len(pages),

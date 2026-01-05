@@ -52,7 +52,7 @@ def list_audit_logs():
         
     logs = (
         query.order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
-        .limit(limit + 1)
+        .limit(limit + 1)   # Fetch extra row to detect "has_more"
         .all()
     )
 
