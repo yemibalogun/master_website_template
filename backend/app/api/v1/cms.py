@@ -758,7 +758,6 @@ def update_block(block_id):
             delete_file(old_media_url)
 
         return jsonify({"message": "Block updated successfully"}), 200
-
     except Exception:
         # 🔥 CLEANUP IF TRANSACTION FAILS
         if new_media_url:
