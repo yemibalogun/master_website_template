@@ -3,6 +3,7 @@ from .config import config_by_name
 from .extensions import db, migrate, jwt
 from .api.v1 import v1_bp
 from .middleware.tenant_middleware import tenant_middleware
+from .errors import register_error_handlers
 
 def create_app(config_name="development"):
     app = Flask(__name__)
@@ -18,6 +19,6 @@ def create_app(config_name="development"):
 
     # Register versioned API blueprints
     app.register_blueprint(v1_bp, url_prefix='/api/v1')
+    register_error_handlers(app)
     
-
     return app

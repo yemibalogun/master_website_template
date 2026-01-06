@@ -18,6 +18,8 @@ from app.normalizers.page import normalize_page
 from app.normalizers.section import normalize_section
 from app.normalizers.pagination import normalize_pagination
 from app.normalizers.block import normalize_block
+from app.domain.invariants.page import assert_page
+from app.domain.invariants.exceptions import InvariantViolation
 from datetime import datetime, timezone
 from dateutil.parser import parse
 from . import v1_bp # import the versioned blueprint
@@ -64,6 +66,9 @@ def create_page():
 
         db.session.add(page)
         db.session.flush()  # ensures page.id exists
+
+        # Invariant Enforcement Point
+        assert_page(page)
 
         log_action(
             action="page.create",
@@ -141,6 +146,9 @@ def update_page(page_id):
                 setattr(page, field, data[field])
                 changed_fields.append(field)
 
+        # Invariant Enforcement Point
+        assert_page(page)
+
         if changed_fields:
             log_action(
                 action="page.update",
@@ -178,16 +186,20 @@ def publish_page(page_id):
     page = Page.query.filter_by(id=page_id, tenant_id=tenant.id).first_or_404()
 
     with transactional():
+        page.status = "published"
+  
+        # Invariant Enforcement Point
+        assert_page(page, publish=True)
+
         # Create snapshot
         version = PageVersion()
+
         version.page_id = page.id
         version.tenant_id = tenant.id
         version.version = next_version(page.id, tenant.id)
         version.status = "published"
         version.snapshot = snapshot_page(page)
         version.created_by = g.current_user.id
-        
-        page.status = "published"
 
         db.session.add(version)
         db.session.flush()
@@ -399,8 +411,11 @@ def rollback_page(page_id, version):
                 Block.query.filter_by(section_id=section.id, tenant_id=tenant.id, deleted_at=None)
             )
 
+        assert_page(page)
+
         # Create rollback version
         new_version = PageVersion()
+
         new_version.tenant_id=tenant.id
         new_version.page_id=page.id
         new_version.version=next_version(page.id, tenant.id)
@@ -903,6 +918,9 @@ def bulk_publish():
         for page in pages:
             if action == "publish":
                 page.status = "published"
+                
+                assert_page(page, publish=True)
+                
             elif action == "unpublish":
                 page.status = "draft"
 
