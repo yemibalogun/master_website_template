@@ -764,7 +764,6 @@ def update_block(block_id):
             delete_file(new_media_url)
         raise
 
-
 @cms_bp.route("/blocks/<block_id>", methods=["DELETE"])
 @jwt_required()
 @tenant_required
