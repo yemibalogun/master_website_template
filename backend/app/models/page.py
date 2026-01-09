@@ -9,10 +9,10 @@ class Page(BaseModel, TenantMixin, SoftDeleteMixin):
     title = db.Column(db.String(200), nullable=False)
     slug = db.Column(db.String(200), nullable=False, index=True)
     status = db.Column(db.String(50), default='draft', index=True)
-    seo = db.Column(db.JSON, default=dict)
+    seo = db.Column(db.JSON(none_as_null=True), default=dict)
 
     __table_args__ = (
-        db.UniqueConstraint("tenant_id", "slug", nam_e="uq_page_slug_per_tenant"),
+        db.UniqueConstraint("tenant_id", "slug", name="uq_page_slug_per_tenant"),
     )
 
     # Relationship to Sections (ordered, cascade deletes)

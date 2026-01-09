@@ -10,11 +10,11 @@ class BaseConfig:
 class DevelopmentConfig(BaseConfig):
     UPLOAD_FOLDER = 'uploads'
     DEBUG = True
-    SQLALCHEMY_DATABASE_URI = os.getenv("DEV_DATABASE_URI")
+    SQLALCHEMY_DATABASE_URI = os.getenv("DEV_DATABASE_URL")
 
 class ProductionConfig(BaseConfig):
     DEBUG = False
-    SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URI")
+    SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL")
 
 config_by_name = {
     "development": DevelopmentConfig,

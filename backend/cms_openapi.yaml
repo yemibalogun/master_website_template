@@ -1,0 +1,686 @@
+openapi: 3.1.0
+info:
+  title: CMS API
+  version: 1.0.0
+  description: Backend API for Pages, Sections, and Blocks with cursor-based pagination, audit logging, and media-safe operations.
+servers:
+  - url: /api/v1/cms
+    description: Local API server
+tags:
+  - name: Pages
+  - name: Sections
+  - name: Blocks
+
+components:
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+      description: Cursor for pagination
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 20
+        maximum: 100
+      description: Maximum number of items to return
+    PageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+      description: Page number for reorder pagination
+    PerPage:
+      name: per_page
+      in: query
+      schema:
+        type: integer
+        default: 10
+      description: Number of items per page for reorder pagination
+  responses:
+    Unauthorized:
+      description: JWT missing or invalid
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: "Unauthorized"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: "Not found"
+    BadRequest:
+      description: Invalid request payload
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: "Invalid payload"
+
+  schemas:
+    Page:
+      type: object
+      properties:
+        id:
+          type: string
+        slug:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+          enum: [draft, published]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Section:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        order:
+          type: integer
+        settings:
+          type: object
+    Block:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        order:
+          type: integer
+        content:
+          type: string
+        media_url:
+          type: string
+          nullable: true
+    Pagination:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            anyOf:
+              - $ref: '#/components/schemas/Page'
+              - $ref: '#/components/schemas/Section'
+              - $ref: '#/components/schemas/Block'
+        cursor:
+          type: object
+          properties:
+            next:
+              type: string
+              nullable: true
+            prev:
+              type: string
+              nullable: true
+
+paths:
+  # ---------------- Pages ----------------
+  /pages:
+    get:
+      tags: [Pages]
+      summary: List all pages (cursor pagination)
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        200:
+          description: List of pages with pagination
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pagination'
+        401:
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Pages]
+      summary: Create a new page
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                slug:
+                  type: string
+                content:
+                  type: string
+      responses:
+        201:
+          description: Page created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  message:
+                    type: string
+        400:
+          $ref: '#/components/responses/BadRequest'
+
+  /pages/{page_id}:
+    put:
+      tags: [Pages]
+      summary: Update a page
+      parameters:
+        - name: page_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                slug:
+                  type: string
+      responses:
+        200:
+          description: Page updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        400:
+          $ref: '#/components/responses/BadRequest'
+        404:
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Pages]
+      summary: Delete a page
+      parameters:
+        - name: page_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Page deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /pages/{page_id}/publish:
+    post:
+      tags: [Pages]
+      summary: Publish a page
+      parameters:
+        - name: page_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Page published
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  page_id:
+                    type: string
+                  version:
+                    type: integer
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /pages/{page_id}/unpublish:
+    post:
+      tags: [Pages]
+      summary: Unpublish a page
+      parameters:
+        - name: page_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Page unpublished
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  page_id:
+                    type: string
+                  version:
+                    type: integer
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /pages/{page_id}/versions:
+    get:
+      tags: [Pages]
+      summary: List versions of a page (cursor pagination)
+      parameters:
+        - name: page_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        200:
+          description: List of page versions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pagination'
+
+  /pages/{page_id}/rollback/{version}:
+    post:
+      tags: [Pages]
+      summary: Rollback a page to a previous version
+      parameters:
+        - name: page_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        200:
+          description: Page rolled back
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  page_id:
+                    type: string
+                  new_version:
+                    type: integer
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /pages/{page_id}/autosave:
+    post:
+      tags: [Pages]
+      summary: Autosave a page draft
+      parameters:
+        - name: page_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Draft autosaved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  page_id:
+                    type: string
+
+  /pages/bulk/publish:
+    post:
+      tags: [Pages]
+      summary: Bulk publish/unpublish pages
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                page_ids:
+                  type: array
+                  items:
+                    type: string
+                action:
+                  type: string
+                  enum: [publish, unpublish]
+      responses:
+        200:
+          description: Bulk operation completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  page_ids:
+                    type: array
+                    items:
+                      type: string
+                  count:
+                    type: integer
+                  action:
+                    type: string
+
+# ---------------- Sections ----------------
+  /pages/{page_id}/sections:
+    get:
+      tags: [Sections]
+      summary: List all sections of a page (cursor pagination)
+      parameters:
+        - name: page_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        200:
+          description: List of sections
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pagination'
+
+    post:
+      tags: [Sections]
+      summary: Create a section
+      parameters:
+        - name: page_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type:
+                  type: string
+                  enum: [hero, features, gallery, content]
+                settings:
+                  type: object
+      responses:
+        201:
+          description: Section created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  message:
+                    type: string
+        400:
+          $ref: '#/components/responses/BadRequest'
+
+  /sections/{section_id}:
+    put:
+      tags: [Sections]
+      summary: Update a section
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type:
+                  type: string
+                  enum: [hero, features, gallery, content]
+                order:
+                  type: integer
+                settings:
+                  type: object
+      responses:
+        200:
+          description: Section updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        400:
+          $ref: '#/components/responses/BadRequest'
+
+    delete:
+      tags: [Sections]
+      summary: Delete a section
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Section deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /sections/{section_id}/blocks:
+    get:
+      tags: [Blocks]
+      summary: List blocks in a section (cursor pagination)
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        200:
+          description: List of blocks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pagination'
+
+    post:
+      tags: [Blocks]
+      summary: Create a block (supports media)
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                type:
+                  type: string
+                  enum: [text, image, video, button]
+                content:
+                  type: string
+                file:
+                  type: string
+                  format: binary
+      responses:
+        201:
+          description: Block created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  order:
+                    type: integer
+                  message:
+                    type: string
+        400:
+          $ref: '#/components/responses/BadRequest'
+
+  /blocks/{block_id}:
+    put:
+      tags: [Blocks]
+      summary: Update a block (supports media)
+      parameters:
+        - name: block_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                type:
+                  type: string
+                  enum: [text, image, video, button]
+                content:
+                  type: string
+                file:
+                  type: string
+                  format: binary
+      responses:
+        200:
+          description: Block updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        400:
+          $ref: '#/components/responses/BadRequest'
+
+    delete:
+      tags: [Blocks]
+      summary: Delete a block
+      parameters:
+        - name: block_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Block deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /sections/{section_id}/blocks/reorder:
+    post:
+      tags: [Blocks]
+      summary: Reorder blocks in a section
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPage'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  order:
+                    type: integer
+      responses:
+        200:
+          description: Blocks reordered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        400:
+          $ref: '#/components/responses/BadRequest'

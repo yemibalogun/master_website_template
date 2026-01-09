@@ -3,6 +3,7 @@ from app.extensions import db
 from .base import BaseModel
 from .tenant_mixin import TenantMixin
 from sqlalchemy import event 
+
 class AuditLog(BaseModel, TenantMixin):
     __tablename__ = "audit_logs"
 
