@@ -20,3 +20,6 @@ class Block(BaseModel, TenantMixin, SoftDeleteMixin):
         db.Index("idx_block_section_order", "section_id", "order"),
     )
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+

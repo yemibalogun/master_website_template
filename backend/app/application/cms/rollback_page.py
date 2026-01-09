@@ -1,6 +1,5 @@
 from typing import Dict, List
 from datetime import datetime, timezone
-
 from app.extensions import db
 from app.models.page import Page
 from app.models.page_version import PageVersion

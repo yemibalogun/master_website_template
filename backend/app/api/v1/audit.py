@@ -4,48 +4,49 @@ from flask_jwt_extended import jwt_required
 from app.utils.decorators import tenant_required, roles_required
 from app.models.audit_log import AuditLog
 from app.utils.pagination import apply_cursor, paginate_cursor
+from app.normalizers.audit import normalize_audit_log
 
 audit_bp = Blueprint("audit", __name__)
 
 
-@audit_bp.route("/", methods=["GET"])
+@audit_bp.route("/audit_logs", methods=["GET"])
 @jwt_required()
 @tenant_required
-@roles_required("admin")
 def list_audit_logs():
     tenant = g.current_tenant
 
-    limit: int = min(int(request.args.get("limit", 20)), 100)
-    cursor: str | None = request.args.get("cursor")
+    limit = request.args.get("limit", 50, type=int)
+    cursor = request.args.get("cursor")
+    direction = request.args.get("direction", "next")
 
-    query = AuditLog.query.filter(
-        AuditLog.tenant_id == tenant.id
+    entity_type = request.args.get("entity_type")
+    entity_id = request.args.get("entity_id")
+
+    query = AuditLog.query.filter_by(
+        tenant_id=tenant.id,
     )
 
-    # Optional filters (stay at API layer)
-    if action := request.args.get("action"):
-        query = query.filter(AuditLog.action == action)
-
-    if entity_type := request.args.get("entity_type"):
+    if entity_type:
         query = query.filter(AuditLog.entity_type == entity_type)
 
-    if entity_id := request.args.get("entity_id"):
+    if entity_id:
         query = query.filter(AuditLog.entity_id == entity_id)
 
-    # 🔑 Cursor application (shared infra logic)
     query = apply_cursor(
-        query=query,
+        query,
         model=AuditLog,
         cursor=cursor,
+        direction=direction,
     )
 
     logs, meta = paginate_cursor(
-        query=query,
+        query,
         model=AuditLog,
         limit=limit,
+        direction=direction,
     )
 
     return jsonify({
-        "data": [log.to_dict() for log in logs],
-        "meta": meta,
+        "items": [normalize_audit_log(l) for l in logs],
+        "pagination": meta,
     }), 200

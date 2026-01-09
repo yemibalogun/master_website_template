@@ -15,11 +15,11 @@ from app.utils.order import compact_order
 from app.utils.audit import log_action
 from app.utils.optimistic_lock import enforce_optimistic_lock
 from app.utils.transaction import transactional
+from app.utils.pagination import paginate_cursor, apply_cursor
 from app.models.page import Page
 from app.models.section import Section
 from app.models.block import Block
 from app.models.page_version import PageVersion
-from app.models.audit_log import AuditLog
 from app.extensions import db
 from app.normalizers.page import normalize_page
 from app.normalizers.section import normalize_section
@@ -29,6 +29,7 @@ from app.domain.invariants.page import assert_page
 from app.domain.invariants.section import assert_section
 from app.domain.invariants.block import assert_block_order, assert_block_media
 from datetime import datetime 
+from typing import List, cast, Dict
 
 cms_bp = Blueprint("cms", __name__)
 
@@ -184,52 +185,58 @@ def delete_page_route(page_id):
 @cms_bp.route("/pages", methods=["GET"])
 @jwt_required()
 @tenant_required
-@roles_required("admin")
-@feature_enabled("enable_cms")
 def list_pages():
     tenant = g.current_tenant
+    limit = min(request.args.get("limit", 20, type=int), 100)
+    cursor = request.args.get("cursor")
 
-    status = request.args.get("status") #draft | published | None
-    page_num = request.args.get("page", 1, type=int)
-    per_page = int(request.args.get("per_page", 10))
+    query = Page.query.filter_by(
+        tenant_id=tenant.id,
+        deleted_at=None,
+    )
 
-    query = Page.query.filter_by(tenant_id=tenant.id)
-    if status:
-        query = query.filter_by(status=status)
+    query = apply_cursor(query, model=Page, cursor=cursor)
+    items, meta = paginate_cursor(query, model=Page, limit=limit)
 
-    pagination = query.order_by(Page.created_at.desc()).paginate(page=page_num, per_page=per_page, error_out=False)
+    # ✅ Tell Pylance these are Page instances
+    items: List[Page] = items
 
     return jsonify(
         normalize_pagination(
-            pagination,
-            lambda p: normalize_page(p, admin=True)
+            items,
+            normalize_fn=normalize_page,
+            cursor=meta
         )
-    )
+        
+    ), 200
 
-@cms_bp.route("/pages/<page_id>/sections", methods=["GET"])
+
+@cms_bp.get("/pages/<int:page_id>/sections")
 @jwt_required()
 @tenant_required
-@roles_required("admin")
-@feature_enabled("enable_cms")
-def list_sections(page_id):
+def list_sections(page_id: int):
     tenant = g.current_tenant
 
-    page_num = request.args.get("page", 1, type=int)
-    per_page = int(request.args.get("per_page", 10))
+    limit = min(request.args.get("limit", 20, type=int), 100)
+    cursor = request.args.get("cursor")
 
     query = Section.query.filter_by(
-        page_id=page_id, 
         tenant_id=tenant.id,
-        deleted_at=None
+        page_id=page_id,
+        deleted_at=None,
     )
-    pagination = query.order_by(Section.order.asc()).paginate(page=page_num, per_page=per_page, error_out=False)
-    
+
+    query = apply_cursor(query, model=Section, cursor=cursor)
+    items, meta = paginate_cursor(query, model=Section, limit=limit)
+
     return jsonify(
         normalize_pagination(
-            pagination,
-            lambda s: normalize_section(s, admin=True)
+            items,
+            normalize_fn=normalize_section,
+            cursor=meta
         )
-    )
+    ), 200
+
 
 @cms_bp.route("/pages/<page_id>/versions", methods=["GET"])
 @jwt_required()
@@ -238,56 +245,31 @@ def list_sections(page_id):
 def list_versions(page_id):
     tenant = g.current_tenant
 
-    # Cursor params
-    cursor_created_at = request.args.get("cursor_created_at")   # ISO8601 datetime string
-    cursor_id = request.args.get("cursor_id", type=int)             # int
-    limit = min(request.args.get("limit", 10, type=int), 50)  # max 100
+    limit = min(request.args.get("limit", 10, type=int), 50)
+    cursor = request.args.get("cursor")
 
     query = PageVersion.query.filter_by(
+        tenant_id=tenant.id,
         page_id=page_id,
-        tenant_id=tenant.id
     )
 
-    # Cursor filter: fetch older versions (descending)
-    if cursor_created_at and cursor_id:
-        cursor_dt = datetime.fromisoformat(cursor_created_at)
-        query = query.filter(
-            db.or_(
-                PageVersion.created_at < cursor_created_at,
-                db.and_(
-                    PageVersion.created_at == cursor_created_at,
-                    PageVersion.id < cursor_id
-                )
-            )
-        )
-    # Fetch limit + 1 to determine if there's a next page
-    versions = query.order_by(
-        PageVersion.created_at.desc(),
-        PageVersion.id.desc()).limit(limit + 1).all()
-    
-    has_next = len(versions) > limit
-    if has_next:
-        next_cursor = {
-            "cursor_created_at": versions[-2].created_at.isoformat(),
-            "cursor_id": versions[-2].id
-        }
-        versions = versions[:-1]  # trim to limit
-    else:
-        next_cursor = None
-        
-    return jsonify({
-        "items": [
-            {
+    query = apply_cursor(query, model=PageVersion, cursor=cursor)
+    versions, meta = paginate_cursor(query, model=PageVersion, limit=limit)
+
+    return jsonify(
+        normalize_pagination(
+            versions,
+            normalize_fn=lambda v: {
                 "id": v.id,
                 "version": v.version,
                 "status": v.status,
                 "created_at": v.created_at.isoformat(),
                 "created_by": v.created_by,
-            }
-            for v in versions
-        ],
-        "next_cursor": next_cursor
-    }), 200
+            },
+            cursor=meta
+        )
+    ), 200
+
 
 @cms_bp.route("/pages/<page_id>/rollback/<int:version>", methods=["POST"])
 @jwt_required()
@@ -340,12 +322,13 @@ def create_section(page_id):
             .filter_by(page_id=page.id, tenant_id=tenant.id)\
             .scalar() or 0
         
-        section = Section()
-        section.tenant_id = tenant.id
-        section.page_id = page.id
-        section.type = section_type
-        section.order = max_order + 1
-        section.settings = data.get("settings", {})
+        section = Section(
+            tenant_id=tenant.id,
+            page_id=page.id,
+            type=section_type,
+            order=max_order + 1,
+            settings=data.get("settings", {})
+        )
 
         db.session.add(section)
         db.session.flush()
@@ -448,32 +431,32 @@ def delete_section(section_id):
 
     return jsonify({"message": "Section deleted and order re-compacted"}), 200
 
-
 @cms_bp.route("/sections/<section_id>/blocks", methods=["GET"])
 @jwt_required()
 @tenant_required
 @roles_required("admin")
-@feature_enabled("enable_cms")
 def list_blocks(section_id):
     tenant = g.current_tenant
 
-    page_num = request.args.get("page", 1, type=int)
-    per_page = int(request.args.get("per_page", 10))
+    limit = min(request.args.get("limit", 20, type=int), 100)
+    cursor = request.args.get("cursor")
 
     query = Block.query.filter_by(
-        tenant_id=tenant.id, 
+        tenant_id=tenant.id,
         section_id=section_id,
         deleted_at=None
     )
-    pagination = query.order_by(Block.order.asc()).paginate(page=page_num, per_page=per_page, error_out=False)
-    
+
+    query = apply_cursor(query, Block, cursor)
+    blocks, meta = paginate_cursor(query, Block, limit)
+
     return jsonify(
         normalize_pagination(
-            pagination,
-            lambda b: normalize_block(b, admin=True)
+            blocks,
+            normalize_fn=normalize_block,
+            cursor=meta
         )
-    )
-
+    ), 200
 
 # ------------------------
 # Sections
@@ -573,13 +556,14 @@ def create_block(section_id):
                 or 0
             )
 
-            block = Block()
-            block.tenant_id=tenant.id
-            block.section_id=section.id
-            block.type=block_type
-            block.order=max_order + 1
-            block.content=data.get("content")
-            block.media_url=media_url
+            block = Block(
+                tenant_id=tenant.id,
+                section_id=section.id,
+                type=block_type,
+                order=max_order + 1,
+                content=data.get("content"),
+                media_url=media_url
+            )
           
             db.session.add(block)
             db.session.flush()
