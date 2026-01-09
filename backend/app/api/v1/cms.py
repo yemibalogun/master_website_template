@@ -29,7 +29,7 @@ from app.domain.invariants.page import assert_page
 from app.domain.invariants.section import assert_section
 from app.domain.invariants.block import assert_block_order, assert_block_media
 from datetime import datetime 
-from typing import List, cast, Dict
+from typing import List, Union, Dict
 
 cms_bp = Blueprint("cms", __name__)
 
@@ -126,6 +126,10 @@ def preview_page(page_id):
     return jsonify(normalize_page(page, admin=True, preview=True))
 
 
+# ------------------------
+# Pages State Changes
+# ------------------------
+
 @cms_bp.route("/pages/<page_id>/publish", methods=["POST"])
 @jwt_required()
 @tenant_required
@@ -140,12 +144,14 @@ def publish_page_route(page_id):
         page_id=page_id,
         actor_id=user.id
     )
-    return jsonify(
-        {
-            "message": "Page published",
-            "version": result["version"]
-        }), 200
-    
+
+    return jsonify({
+        "message": "Page published successfully",
+        "page_id": result["page_id"],
+        "version": result["version"]
+    }), 200
+
+
 @cms_bp.route("/pages/<page_id>/unpublish", methods=["POST"])
 @jwt_required()
 @tenant_required
@@ -153,15 +159,19 @@ def publish_page_route(page_id):
 @feature_enabled("enable_cms")
 def unpublish_page_route(page_id):
     tenant = g.current_tenant
-    page = Page.query.filter_by(id=page_id, tenant_id=tenant.id).first_or_404()
     user = g.current_user
 
-    unpublish_page(
+    result = unpublish_page(
         tenant_id=tenant.id,
-        actor_id=user.id,
-        page_id=page.id
+        page_id=page_id,
+        actor_id=user.id
     )
-    return jsonify({"message": "Page unpublished successfully"}), 200
+
+    return jsonify({
+        "message": "Page unpublished successfully",
+        "page_id": result["page_id"],
+        "version": result["version"]
+    }), 200
 
 
 @cms_bp.route("/pages/<page_id>", methods=["DELETE"])
@@ -279,9 +289,6 @@ def rollback_page_route(page_id, version):
     tenant = g.current_tenant
     user = g.current_user
 
-    # -------------------------------
-    # 2️⃣ Otherwise → POST request with version → perform rollback
-    # -------------------------------
     result = rollback_page(
         tenant_id=tenant.id,
         page_id=page_id,
@@ -290,8 +297,9 @@ def rollback_page_route(page_id, version):
     )
 
     return jsonify({
-        "message": f"Rolled back to version {version}",
-        "new_version": result["version"]
+        "message": f"Page rolled back successfully to version {version}",
+        "page_id": result["page_id"],
+        "new_version": result["new_version"]
     }), 200
 
 
@@ -309,13 +317,9 @@ def create_section(page_id):
     data = request.get_json()
     
     section_type = data.get("type")
-
-    if not section_type:
-        return jsonify({"error": "Section type is required"}), 400
-
-    if section_type not in ALLOWED_SECTION_TYPES:
+    if not section_type or section_type not in ALLOWED_SECTION_TYPES:
         return jsonify({"error": "Invalid section type"}), 400
-
+    
     with transactional():
         # Determine the current max order for this page
         max_order = db.session.query(db.func.max(Section.order))\
@@ -331,11 +335,13 @@ def create_section(page_id):
         )
 
         db.session.add(section)
-        db.session.flush()
+        db.session.flush()  # ensure section.id is available
 
+        # Enforce invariants
         assert_section(section)  # Invariant Enforcement Point
         assert_page(page)
         
+        # Audit logging
         log_action(
             action="section.create",
             entity_type="section",
@@ -357,22 +363,15 @@ def create_section(page_id):
 def update_section(section_id):
     tenant = g.current_tenant
     section = Section.query.filter_by(id=section_id, tenant_id=tenant.id).first_or_404()
-    
-    # -----------------------
-    # Optimistic Locking Check
-    # -----------------------
-    enforce_optimistic_lock(section)
 
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "No data provided"}), 400
-  
+    enforce_optimistic_lock(section)    # Optimistic lock
+    data = request.get_json() or {}
+
     if "type" in data and data["type"] not in ALLOWED_SECTION_TYPES:
         return jsonify({"error": "Invalid section type"}), 400
-
+    
     with transactional():
         changed_fields = []
-
         for field in ("type", "order", "settings"):
             if field in data and getattr(section, field) != data[field]:
                 setattr(section, field, data[field])
@@ -400,12 +399,13 @@ def update_section(section_id):
 def delete_section(section_id):
     tenant = g.current_tenant
     section = Section.query.filter_by(id=section_id, tenant_id=tenant.id).first_or_404()
-
     page_id = section.page_id
 
-    media_to_cleanup = []
+    # Collect media for cleanup
+    media_to_cleanup: list[str] = [b.media_url for b in section.blocks if b.media_url]
     
     with transactional():
+        # Soft delete blocks first
         for block in section.blocks:
             if block.media_url:
                 media_to_cleanup.append(block.media_url)
@@ -414,18 +414,22 @@ def delete_section(section_id):
         section.soft_delete()
         db.session.flush()
 
+        # Re-compact section order after deletion
         compact_order(
             Section.query.filter_by(page_id=page_id, tenant_id=tenant.id, deleted_at=None)
         )
 
         assert_page(section.page)
 
+        # Audit
         log_action(
             action="section.delete",
             entity_type="section",
             entity_id=section.id,
-            payload={"page_id": page_id}
+            payload={"page_id": page_id, "blocks_deleted": len(media_to_cleanup)}
         )
+
+    # Cleanup media outside transaction
     for media_url in media_to_cleanup:
         delete_file(media_url)
 
@@ -438,17 +442,26 @@ def delete_section(section_id):
 def list_blocks(section_id):
     tenant = g.current_tenant
 
+    # Ensure section exists and belongs to this tenant 
+    section = Section.query.filter_by(
+        id=section_id,
+        tenant_id=tenant.id,
+        deleted_at=None
+    ).first_or_404()
+
+    # Pagination parameters
     limit = min(request.args.get("limit", 20, type=int), 100)
     cursor = request.args.get("cursor")
 
+    # Query blocks for htis section
     query = Block.query.filter_by(
         tenant_id=tenant.id,
         section_id=section_id,
         deleted_at=None
     )
 
-    query = apply_cursor(query, Block, cursor)
-    blocks, meta = paginate_cursor(query, Block, limit)
+    query = apply_cursor(query, model=Block, cursor=cursor)
+    blocks, meta = paginate_cursor(query, model=Block, limit=limit)
 
     return jsonify(
         normalize_pagination(
@@ -470,7 +483,6 @@ def reorder_sections(page_id):
     tenant = g.current_tenant
     data = request.get_json()  # [{id: "...", order: 0}, ...]
     
-    
     if not isinstance(data, list):
         return jsonify({"error": "Invalid payload"}), 400
 
@@ -482,8 +494,11 @@ def reorder_sections(page_id):
     pagination = Section.query.filter_by(
         page_id=page_id, 
         tenant_id=tenant.id
-        ).order_by(Section.order.asc())\
-        .paginate(page=page_num, per_page=per_page, error_out=False)
+    ).order_by(Section.order.asc()).paginate(
+        page=page_num, 
+        per_page=per_page, 
+        error_out=False
+    )
 
     with transactional():
         # Map paginated sections by id for validation
@@ -495,11 +510,12 @@ def reorder_sections(page_id):
 
         db.session.flush()
 
-        # FINAL STEP: re-compact ALL sections on this page
+        # re-compact ALL sections on this page
         compact_order(
             Section.query.filter_by(page_id=page_id, tenant_id=tenant.id, deleted_at=None)
         )
 
+        # Enforce invariants and audit
         assert_page(Page.query.filter_by(id=page_id, tenant_id=tenant.id).first_or_404())
 
         log_action(
@@ -513,7 +529,9 @@ def reorder_sections(page_id):
             }
         )
 
-    return jsonify({"message": "Sections reordered and normalized"}), 200
+    return jsonify({
+        "message": "Sections reordered and normalized"
+    }), 200
 
 
 # ------------------------
@@ -531,18 +549,17 @@ def create_block(section_id):
         tenant_id=tenant.id
     ).first_or_404()
 
-    data = request.form
-    block_type = data.get("type")
+    data = request.form or {}
+    file = request.files.get("file")
 
+    block_type = data.get("type")
     if not block_type:
         return jsonify({"error": "Block type is required"}), 400
 
     if block_type not in ALLOWED_BLOCK_TYPES:
         return jsonify({"error": "Invalid block type"}), 400
 
-    file = request.files.get("file")
-    media_url = None
-
+    media_url: str | None = None
     try:
         # Save file first (temporary success)
         if file:
@@ -566,12 +583,14 @@ def create_block(section_id):
             )
           
             db.session.add(block)
-            db.session.flush()
+            db.session.flush()  # ensure block.id is available
 
+            # Invariants
             assert_block_order(block)
             assert_block_media(block)
             assert_section(section)
 
+            # Audit
             log_action(
                 action="block.create",
                 entity_type="block",
@@ -592,7 +611,7 @@ def create_block(section_id):
         ), 201
 
     except Exception:
-        # 🔥 CLEANUP ON FAILURE
+        # 🔥 Cleanup media if transaction fails
         if media_url:
             delete_file(media_url)
         raise
@@ -605,17 +624,15 @@ def create_block(section_id):
 def update_block(block_id):
     tenant = g.current_tenant
     block = Block.query.filter_by(id=block_id, tenant_id=tenant.id).first_or_404()
-
     enforce_optimistic_lock(block)
 
     data = request.form if request.form else request.get_json(silent=True) or {}
+    new_media_url: str | None = None
+    old_media_url: str | None = block.media_url
 
     # ✅ VALIDATE FIRST — BEFORE SAVING FILE
     if "type" in data and data["type"] not in ALLOWED_BLOCK_TYPES:
         return jsonify({"error": "Invalid block type"}), 400
-
-    new_media_url = None
-    old_media_url = block.media_url
 
     try:
         # SAVE FILE ONLY AFTER VALIDATION
@@ -630,21 +647,25 @@ def update_block(block_id):
                 if field in data:
                     setattr(block, field, data[field])
 
+            # Invariants
             assert_block_order(block)
             assert_block_media(block)
             assert_section(block.section)
 
+            # Audit
             log_action(
                 action="block.update",
                 entity_type="block",
-                entity_id=block.id
+                entity_id=block.id,
+                payload={"updated_fields": list(data.keys())}
             )
 
-        # ✅ DELETE OLD FILE AFTER COMMIT
+        # Delete old media after successful commit
         if new_media_url and old_media_url:
             delete_file(old_media_url)
 
         return jsonify({"message": "Block updated successfully"}), 200
+    
     except Exception:
         # 🔥 CLEANUP IF TRANSACTION FAILS
         if new_media_url:
@@ -659,13 +680,11 @@ def update_block(block_id):
 def delete_block(block_id):
     tenant = g.current_tenant
     block = Block.query.filter_by(id=block_id, tenant_id=tenant.id).first_or_404()
-
     media_to_delete = block.media_url
 
     with transactional():
         block.soft_delete()
         assert_section(block.section)
-
         log_action(
             action="block.delete",
             entity_type="block",
@@ -699,7 +718,7 @@ def reorder_blocks(section_id):
     pagination = Block.query.filter_by(
         section_id=section_id, 
         tenant_id=tenant.id
-        ).order_by(Block.order.asc())\
+    ).order_by(Block.order.asc())\
         .paginate(page=page_num, per_page=per_page, error_out=False)
 
     with transactional():
@@ -712,9 +731,12 @@ def reorder_blocks(section_id):
 
         db.session.flush()
 
+        # Re-compact all blocks in section
         compact_order(
             Block.query.filter_by(section_id=section_id, tenant_id=tenant.id, deleted_at=None)
         )
+
+        # Enforce invariants and audit
         section = Section.query.filter_by(id=section_id, tenant_id=tenant.id).first_or_404()
         assert_section(section)
 
@@ -739,21 +761,25 @@ def reorder_blocks(section_id):
 def autosave_page_route(page_id):
     tenant = g.current_tenant
     user = g.current_user
-    
+
     autosave_page(
         tenant_id=tenant.id,
         page_id=page_id,
         actor_id=user.id
     )
 
-    return jsonify({"message": "Draft autosaved"}), 200
+    # Minimal response, consistent with other state actions
+    return jsonify({
+        "message": "Page draft autosaved successfully",
+        "page_id": page_id
+    }), 200
 
 
 @cms_bp.route("/pages/bulk/publish", methods=["POST"])
 @jwt_required()
 @tenant_required
 @roles_required("admin")
-def bulk_publish():
+def bulk_publish_route():
     tenant = g.current_tenant
     user = g.current_user
     data = request.get_json() or {}
@@ -764,16 +790,30 @@ def bulk_publish():
     if action not in {"publish", "unpublish"}:
         return jsonify({"error": "Invalid action"}), 400
 
-    result = bulk_publish_pages(
-        tenant_id=tenant.id,
-        page_ids=page_ids,
-        action=action,
-        actor_id=user.id
-    )
+    result: Dict[str, Union[int, str]] = {}
+    with transactional():
+        count = 0
+        for page_id in page_ids:
+            if action == "publish":
+                publish_page(tenant_id=tenant.id, page_id=page_id, actor_id=user.id)
+            else:
+                unpublish_page(tenant_id=tenant.id, page_id=page_id, actor_id=user.id)
+            count += 1
+
+        # Audit the bulk operation
+        log_action(
+            action=f"pages.bulk.{action}",
+            entity_type="page",
+            entity_id=None,
+            payload={"page_ids": page_ids, "count": count},
+        )
+
+        result["count"] = count
+        result["action"] = action
 
     return jsonify({
         "message": f"Pages {action}ed successfully",
+        "page_ids": page_ids,
         "count": result["count"],
         "action": result["action"]
     }), 200
-

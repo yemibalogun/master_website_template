@@ -1,3 +1,4 @@
+# app/application/cms/rollback_page.py
 from typing import Dict, List
 from datetime import datetime, timezone
 from app.extensions import db
@@ -12,6 +13,8 @@ from app.utils.audit import log_action
 from app.utils.media import delete_file
 from app.domain.invariants.page import assert_page
 from app.domain.invariants.section import assert_section
+from app.domain.lifecycle.page import assert_page_transition
+from sqlalchemy import select
 
 
 def rollback_page(
@@ -30,30 +33,41 @@ def rollback_page(
     - Re-compact section & block ordering
     - Create new rollback version
     - Audit logging
-
-    Returns a dict with the new rollback version.
     """
 
-    # Fetch the PageVersion to roll back to
-    pv: PageVersion = (
+    # 1️⃣ Fetch the PageVersion to roll back to
+    pv: PageVersion | None = (
         PageVersion.query
         .filter_by(page_id=page_id, tenant_id=tenant_id, version=rollback_version)
-        .first_or_404()
+        .first()
     )
+
+    if not pv:
+        raise ValueError("PageVersion not found")
 
     snapshot = pv.snapshot
 
-    # Fetch the live page
-    page: Page = (
-        Page.query
-        .filter_by(id=page_id, tenant_id=tenant_id)
-        .first_or_404()
+    # 2️⃣ Fetch live Page with row-level lock
+    page: Page | None = (
+        db.session.execute(
+            select(Page)
+            .where(Page.id == page_id, Page.tenant_id == tenant_id)
+            .with_for_update()
+        )
+        .scalar_one_or_none()
     )
+
+    if not page:
+        raise ValueError("Page not found")
+
+    # Ensure lifecycle transition is valid
+    assert_page_transition(from_status=page.status, to_status="draft")
+    page.status = "draft"
 
     media_to_cleanup: List[str] = []
 
     with transactional():
-        # 1️⃣ Soft-delete all current sections & blocks
+        # 3️⃣ Soft-delete current sections & blocks
         current_sections = (
             Section.query
             .filter_by(page_id=page.id, tenant_id=tenant_id, deleted_at=None)
@@ -67,7 +81,7 @@ def rollback_page(
                 block.soft_delete()
             section.soft_delete()
 
-        # 2️⃣ Restore sections and blocks from snapshot
+        # 4️⃣ Restore sections & blocks from snapshot
         for s_data in snapshot["sections"]:
             section = Section()
             section.tenant_id = tenant_id
@@ -77,7 +91,7 @@ def rollback_page(
             section.settings = s_data["settings"]
 
             db.session.add(section)
-            db.session.flush()  # ensure section.id
+            db.session.flush()  # Ensure section.id
 
             for b_data in s_data["blocks"]:
                 block = Block()
@@ -90,7 +104,7 @@ def rollback_page(
 
                 db.session.add(block)
 
-        # 3️⃣ Normalize ordering
+        # 5️⃣ Normalize ordering
         sections = Section.query.filter_by(page_id=page.id, tenant_id=tenant_id, deleted_at=None)
         compact_order(sections)
 
@@ -98,10 +112,10 @@ def rollback_page(
             blocks_query = Block.query.filter_by(section_id=section.id, tenant_id=tenant_id, deleted_at=None)
             compact_order(blocks_query)
 
-        # 4️⃣ Assert invariants
+        # 6️⃣ Assert invariants
         assert_page(page)
 
-        # 5️⃣ Create rollback PageVersion
+        # 7️⃣ Create rollback PageVersion
         new_version = PageVersion()
         new_version.page_id = page.id
         new_version.tenant_id = tenant_id
@@ -112,7 +126,7 @@ def rollback_page(
 
         db.session.add(new_version)
 
-        # 6️⃣ Audit
+        # 8️⃣ Audit logging
         log_action(
             action="page.rollback",
             entity_type="page",
@@ -123,7 +137,7 @@ def rollback_page(
             }
         )
 
-    # 7️⃣ Cleanup media outside transaction
+    # 9️⃣ Cleanup media outside transaction
     for media_url in media_to_cleanup:
         delete_file(media_url)
 

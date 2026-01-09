@@ -1,5 +1,6 @@
+# app/application/cms/publish_page.py
 from typing import Dict
-from flask import g
+from sqlalchemy import select
 from app.extensions import db
 from app.models.page import Page
 from app.models.page_version import PageVersion
@@ -7,6 +8,7 @@ from app.utils.transaction import transactional
 from app.utils.versioning import snapshot_page, next_version
 from app.utils.audit import log_action
 from app.domain.invariants.page import assert_page
+from app.domain.lifecycle.page import assert_page_transition
 
 
 def publish_page(
@@ -18,30 +20,37 @@ def publish_page(
     """
     Publishes a page and creates an immutable version snapshot.
 
-    This function owns:
+    Responsibilities:
     - transactional boundary
     - invariant enforcement
     - version creation
     - audit logging
-
-    It deliberately knows NOTHING about Flask, requests, or responses.
     """
 
-    # Fetch page inside service to guarantee tenant isolation
-    page: Page = (
-        Page.query
-        .filter_by(id=page_id, tenant_id=tenant_id)
-        .first_or_404()
+    # 1️⃣ Fetch page with row-level lock
+    page = (
+        db.session.execute(
+            select(Page)
+            .where(Page.id == page_id, Page.tenant_id == tenant_id)
+            .with_for_update()
+        )
+        .scalar_one_or_none()
     )
 
+    if not page:
+        raise ValueError("Page not found")
+
     with transactional():
-        # State transition
+        # 2️⃣ Lifecycle transition enforcement
+        assert_page_transition(from_status=page.status, to_status="published")
+
+        # 3️⃣ Apply state change
         page.status = "published"
 
-        # Enforce publish-specific invariants
+        # 4️⃣ Enforce publish-specific invariants
         assert_page(page, publish=True)
 
-        # Create immutable snapshot version
+        # 5️⃣ Create immutable PageVersion
         version = PageVersion()
         version.page_id = page.id
         version.tenant_id = tenant_id
@@ -53,7 +62,7 @@ def publish_page(
         db.session.add(version)
         db.session.flush()  # ensures version.version is available
 
-        # Audit AFTER all invariants pass
+        # 6️⃣ Audit logging
         log_action(
             action="page.publish",
             entity_type="page",
@@ -61,7 +70,6 @@ def publish_page(
             payload={"version": version.version},
         )
 
-    # Return minimal DTO — API decides response shape
     return {
         "page_id": page.id,
         "version": version.version,
