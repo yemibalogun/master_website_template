@@ -1,0 +1,73 @@
+import { NextRequest, NextResponse } from "next/server"
+
+/** Admin public routes that don't require login */
+const PUBLIC_PATHS: string[] = [
+  "/admin/login",
+]
+
+/** Extract a cookie safely */
+function getCookie(request: NextRequest, name: string): string | null {
+  try {
+    return request.cookies.get(name)?.value ?? null
+  } catch {
+    return null
+  }
+}
+
+/** Check if the path is public */
+function isPublicPath(pathname: string): boolean {
+  return PUBLIC_PATHS.some((path) => pathname.startsWith(path))
+}
+
+export function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl
+
+  // Only run middleware for admin routes
+  if (!pathname.startsWith("/admin")) return NextResponse.next()
+
+  // Skip public paths
+  if (isPublicPath(pathname)) return NextResponse.next()
+
+  const token = getCookie(request, "access_token")
+  const tenantCookie = getCookie(request, "tenant_id")
+
+  // 1️⃣ Require authentication
+  if (!token) {
+    const loginUrl = request.nextUrl.clone()
+    loginUrl.pathname = "/admin/login"
+    loginUrl.searchParams.set("next", pathname)
+    return NextResponse.redirect(loginUrl)
+  }
+
+  // 2️⃣ Require tenant selection
+  if (!tenantCookie) {
+    const tenantUrl = request.nextUrl.clone()
+    tenantUrl.pathname = "/admin/select-tenant"
+    return NextResponse.redirect(tenantUrl)
+  }
+
+  // 3️⃣ Enforce URL tenant matches cookie
+  const match = pathname.match(/^\/admin\/tenants\/([^/]+)/)
+  const urlTenantId = match?.[1]
+
+  if (urlTenantId && urlTenantId !== tenantCookie) {
+    const redirectUrl = request.nextUrl.clone()
+    redirectUrl.pathname = `/admin/tenants/${tenantCookie}/dashboard`
+    return NextResponse.redirect(redirectUrl)
+  }
+
+  // 4️⃣ Inject tenant header
+  const requestHeaders = new Headers(request.headers)
+  requestHeaders.set("X-Tenant-ID", tenantCookie)
+
+  return NextResponse.next({
+    request: {
+      headers: requestHeaders,
+    },
+  })
+}
+
+/** Only run middleware for admin routes */
+export const config = {
+  matcher: ["/admin/:path*"],
+}

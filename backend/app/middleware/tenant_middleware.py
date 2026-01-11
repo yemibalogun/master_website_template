@@ -1,6 +1,5 @@
 from flask import request, g, abort
 from app.models.tenant import Tenant
-from app.extensions import db
 
 # Routes that do NOT require tenant context
 EXEMPT_PATH_PREFIXES = (

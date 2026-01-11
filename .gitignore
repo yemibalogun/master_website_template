@@ -18,3 +18,8 @@ instance/
 .vscode/
 .idea/
 *.swp
+
+# Documentation
+structure.md
+admin_design.md
+admin_ui.md
