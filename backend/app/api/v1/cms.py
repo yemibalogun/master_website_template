@@ -3,7 +3,6 @@ from flask import Blueprint, g, request, jsonify
 from flask_jwt_extended import jwt_required
 from app.application.cms.publish_page import publish_page
 from app.application.cms.rollback_page import rollback_page
-from app.application.cms.bulk_publish import bulk_publish_pages
 from app.application.cms.autosave_page import autosave_page
 from app.application.cms.unpublish_page import unpublish_page
 from app.application.cms.create_page import create_page
